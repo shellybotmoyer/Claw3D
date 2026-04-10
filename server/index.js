@@ -1,4 +1,5 @@
 const http = require("node:http");
+require("dotenv").config();
 const https = require("node:https");
 const next = require("next");
 
@@ -67,7 +68,7 @@ async function main() {
   const dev = process.argv.includes("--dev");
   const useHttps = process.argv.includes("--https") || process.env.HTTPS === "true";
   const hostnames = Array.from(new Set(resolveHosts(process.env)));
-  const hostname = hostnames[0] ?? "127.0.0.1";
+  const hostname = process.env.HOST ? hostnames[0] : "0.0.0.0";
   const port = resolvePort();
   for (const host of hostnames) {
     assertPublicHostAllowed({
