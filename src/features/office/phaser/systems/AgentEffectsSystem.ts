@@ -13,6 +13,15 @@ type AgentEffectsSystemParams = {
   scene: Phaser.Scene;
 };
 
+type PulseRing = {
+  ring: Phaser.GameObjects.Arc;
+  createdAt: number;
+  /** Duration in ms before the ring fully fades out. */
+  duration: number;
+  /** Starting fill color for the ring. */
+  color: number;
+};
+
 type AvatarState = {
   sprite: Phaser.GameObjects.Arc;
   label: Phaser.GameObjects.Text;
@@ -27,6 +36,8 @@ type AvatarState = {
   pathIndex: number;
   /** Stringified last-resolved target so we know when to re-path. */
   lastTargetKey: string;
+  /** Previous state — used to detect state transitions for pulse effect. */
+  prevState: OfficeAgentPresence["state"] | null;
 };
 
 const THOUGHTS = ["coffee", "gamepad", "zzz", "idea", "music"] as const;
@@ -48,9 +59,18 @@ const hash = (value: string) => {
   return h;
 };
 
+/** Duration for a state-change pulse ring to fade out (ms). */
+const PULSE_DURATION = 800;
+/** Initial radius of the pulse ring. */
+const PULSE_RADIUS_START = 10;
+/** Maximum radius the pulse ring expands to. */
+const PULSE_RADIUS_END = 28;
+
 export class AgentEffectsSystem {
   private readonly scene: Phaser.Scene;
   private readonly avatars = new Map<string, AvatarState>();
+  /** Active pulse rings spawned by state changes — faded and destroyed each frame. */
+  private readonly pulses: PulseRing[] = [];
 
   /**
    * Cached nav grid.  Rebuilt when the map identity changes so agents always
@@ -90,8 +110,15 @@ export class AgentEffectsSystem {
     for (const agent of params.agents) {
       keep.add(agent.agentId);
       const entry = this.getOrCreate(agent.agentId, agent.name, agent.state);
+      const previousState = entry.prevState;
       entry.sprite.fillColor = stateColor(agent.state);
       entry.stateIcon.setText(agent.state === "error" ? "!" : "");
+
+      // Detect state transition → spawn a pulsing ring at the agent's position.
+      if (previousState !== null && previousState !== agent.state) {
+        this.spawnPulse(entry.sprite.x, entry.sprite.y, stateColor(agent.state));
+      }
+      entry.prevState = agent.state;
 
       const target = this.resolveTarget(agent.state, zonesByType);
       const targetKey = `${target.x}:${target.y}`;
@@ -141,6 +168,9 @@ export class AgentEffectsSystem {
       }
     }
 
+    // Animate active pulse rings — expand radius and fade opacity.
+    this.tickPulses();
+
     for (const [agentId, entry] of this.avatars) {
       if (keep.has(agentId)) continue;
       entry.sprite.destroy();
@@ -158,8 +188,55 @@ export class AgentEffectsSystem {
       entry.stateIcon.destroy();
       entry.thoughtIcon.destroy();
     }
+    for (const pulse of this.pulses) {
+      pulse.ring.destroy();
+    }
+    this.pulses.length = 0;
     this.avatars.clear();
     this.navGrid = null;
+  }
+
+  /**
+   * Spawn a pulse ring that expands and fades to signal a state transition.
+   */
+  private spawnPulse(x: number, y: number, color: number): void {
+    const ring = this.scene.add.circle(x, y, PULSE_RADIUS_START, color, 0.6);
+    ring.setStrokeStyle(2, color, 0.8);
+    ring.setDepth(8_400);
+    this.pulses.push({
+      ring,
+      createdAt: this.scene.time.now,
+      duration: PULSE_DURATION,
+      color,
+    });
+  }
+
+  /**
+   * Advance all active pulse rings — expand outward and fade to transparent.
+   * Completed pulses are destroyed and removed.
+   */
+  private tickPulses(): void {
+    const now = this.scene.time.now;
+    for (let i = this.pulses.length - 1; i >= 0; i--) {
+      const pulse = this.pulses[i];
+      const elapsed = now - pulse.createdAt;
+      if (elapsed >= pulse.duration) {
+        pulse.ring.destroy();
+        this.pulses.splice(i, 1);
+        continue;
+      }
+      const progress = elapsed / pulse.duration;
+      // Ease-out curve: starts fast, slows toward the end.
+      const eased = 1 - Math.pow(1 - progress, 2);
+      const radius = PULSE_RADIUS_START + (PULSE_RADIUS_END - PULSE_RADIUS_START) * eased;
+      pulse.ring.setRadius(radius);
+      pulse.ring.setAlpha(Math.max(0, 0.6 * (1 - progress)));
+      pulse.ring.setStrokeStyle(
+        Math.max(0.5, 2 * (1 - progress)),
+        pulse.color,
+        Math.max(0, 0.8 * (1 - progress)),
+      );
+    }
   }
 
   /**
@@ -233,6 +310,7 @@ export class AgentEffectsSystem {
       path: [],
       pathIndex: 0,
       lastTargetKey: "",
+      prevState: null,
     };
     this.avatars.set(agentId, created);
     return created;
