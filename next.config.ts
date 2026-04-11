@@ -57,6 +57,5 @@ const nextConfig: NextConfig = {
       },
     ];
   },
+  allowedDevOrigins: ['54.208.117.247', 'localhost'],
 };
-
-export default nextConfig;

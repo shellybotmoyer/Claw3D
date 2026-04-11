@@ -9,7 +9,7 @@
  * 3. Agent state polling via /api/hermes-avatar/state
  */
 
-import type { ChatMessage, ChatStatus, TTSRequest } from "../types";
+import type { ChatMessage, ChatStatus, TTSRequest } from "./types";
 
 export interface HermesBridgeOptions {
   apiBaseUrl: string;

@@ -5,8 +5,8 @@
  * Uses keyword matching + pattern detection. Can be upgraded to use an LLM for richer mapping.
  */
 
-import type { AvatarCommandHint, SentimentResult } from "../types";
-import { SENTIMENT_MAP } from "../types";
+import type { AvatarCommandHint, SentimentResult } from "./types";
+import { SENTIMENT_MAP } from "./types";
 
 // Keyword patterns for sentiment detection
 const KEYWORD_PATTERNS: Array<{ pattern: RegExp; sentiment: string }> = [
