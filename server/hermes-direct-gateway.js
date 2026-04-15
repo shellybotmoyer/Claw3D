@@ -2,12 +2,15 @@
 
 /**
  * Direct Hermes WebSocket Gateway for Claw3D
- * 
- * This gateway speaks the Claw3D gateway protocol directly,
- * eliminating the need for the HTTP adapter translation layer.
- * 
- * It connects to the Hermes HTTP API and translates WebSocket
- * messages from Claw3D Studio into Hermes API calls.
+ *
+ * This gateway speaks the full OpenClaw gateway protocol (v3),
+ * translating WebSocket JSON-RPC frames from Claw3D Studio into
+ * Hermes HTTP API calls and returning sensible defaults for methods
+ * that have no Hermes equivalent.
+ *
+ * Protocol reference: discovered from Claw3D client source
+ *   GatewayBrowserClient.ts, GatewayClient.ts, agentConfig.ts,
+ *   agentFiles.ts, execApprovals.ts, and feature-level callers.
  */
 
 const { Buffer } = require("node:buffer");
@@ -15,15 +18,20 @@ const https = require("node:https");
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
+const crypto = require("node:crypto");
+const os = require("node:os");
 const { WebSocketServer } = require("ws");
 
+// ---------------------------------------------------------------------------
+// .env loader
+// ---------------------------------------------------------------------------
 function loadDotenvFile(filePath) {
   if (!fs.existsSync(filePath)) return;
   const content = fs.readFileSync(filePath, "utf8");
-  for (const rawLine of content.split(/\\r?\\n/)) {
+  for (const rawLine of content.split(/\r?\n/)) {
     const line = rawLine.trim();
     if (!line || line.startsWith("#")) continue;
-    const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*(.*)$/);
+    const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
     if (!match) continue;
     const [, key, rawValue] = match;
     if (process.env[key] !== undefined) continue;
@@ -46,13 +54,14 @@ function loadRuntimeEnv() {
 
 loadRuntimeEnv();
 
-// Configuration from environment
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
 const HERMES_API_URL = (process.env.HERMES_API_URL || "http://localhost:8644").replace(/\/$/, "");
 const HERMES_API_KEY = process.env.HERMES_API_KEY || "";
 const GATEWAY_PORT = parseInt(process.env.GATEWAY_PORT || "18789", 10);
 const HOST = process.env.HOST || "0.0.0.0";
 
-// Hermes agent identity
 const AGENT_ID = "hermes";
 const AGENT_NAME = process.env.HERMES_AGENT_NAME || "Hermes";
 const MODEL = process.env.HERMES_MODEL || "hermes";
@@ -62,29 +71,41 @@ console.log(`[hermes-direct-gateway] Hermes API: ${HERMES_API_URL}`);
 console.log(`[hermes-direct-gateway] Gateway Port: ${GATEWAY_PORT}`);
 console.log(`[hermes-direct-gateway] Host: ${HOST}`);
 
-// In-memory state for Hermes agent
-const conversationHistory = new Map(); // sessionKey -> messages
-const agentRegistry = new Map(); // agentId -> agentInfo
-const activeSendEventFns = new Set(); // WebSocket broadcast functions
+// ---------------------------------------------------------------------------
+// In-memory state
+// ---------------------------------------------------------------------------
+const conversationHistory = new Map(); // sessionKey -> messages[]
+const agentRegistry = new Map();       // agentId -> agentInfo
+const agentFiles = new Map();          // `${agentId}:${name}` -> content string
+const activeSendEventFns = new Set();
+const tasks = new Map();               // taskId -> task record
+const cronJobs = new Map();            // cronId -> cron record
+let configData = {};                   // openclaw.json equivalent
+let configHash = crypto.randomUUID();
+const configPath = path.join(os.homedir(), ".hermes", "openclaw.json");
+const execApprovalsData = { version: 1, agents: {} };
+let execApprovalsHash = crypto.randomUUID();
+let seqCounter = 0;
 
-// Initialize with the main Hermes agent
+// Initialize main Hermes agent
 const mainAgentInfo = {
   id: AGENT_ID,
   name: AGENT_NAME,
   model: MODEL,
   role: "Orchestrator",
+  workspace: path.join(os.homedir(), ".hermes", "workspace"),
   systemPrompt: `You are ${AGENT_NAME}, an AI agent in the Claw3D 3D office. You can help with various tasks and converse with users.`,
-  sessionKey: `agent:${AGENT_ID}:main`
+  sessionKey: `agent:${AGENT_ID}:main`,
 };
-
-// Add main agent to registry
 agentRegistry.set(AGENT_ID, mainAgentInfo);
 conversationHistory.set(mainAgentInfo.sessionKey, []);
 
+// ---------------------------------------------------------------------------
 // Hermes HTTP API helpers
-function hermesPost(path, body) {
+// ---------------------------------------------------------------------------
+function hermesPost(apiPath, body) {
   return new Promise((resolve, reject) => {
-    const urlStr = HERMES_API_URL + path;
+    const urlStr = HERMES_API_URL + apiPath;
     let url;
     try { url = new URL(urlStr); } catch { reject(new Error(`Invalid URL: ${urlStr}`)); return; }
     const transport = url.protocol === "https:" ? https : http;
@@ -92,8 +113,13 @@ function hermesPost(path, body) {
     const headers = { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(bodyStr) };
     if (HERMES_API_KEY) headers["Authorization"] = `Bearer ${HERMES_API_KEY}`;
     const req = transport.request(
-      { hostname: url.hostname, port: url.port ? parseInt(url.port, 10) : (url.protocol === "https:" ? 443 : 80),
-        path: url.pathname + (url.search || ""), method: "POST", headers },
+      {
+        hostname: url.hostname,
+        port: url.port ? parseInt(url.port, 10) : (url.protocol === "https:" ? 443 : 80),
+        path: url.pathname + (url.search || ""),
+        method: "POST",
+        headers,
+      },
       resolve
     );
     req.on("error", reject);
@@ -102,17 +128,22 @@ function hermesPost(path, body) {
   });
 }
 
-function hermesGet(path) {
+function hermesGet(apiPath) {
   return new Promise((resolve, reject) => {
-    const urlStr = HERMES_API_URL + path;
+    const urlStr = HERMES_API_URL + apiPath;
     let url;
     try { url = new URL(urlStr); } catch { reject(new Error(`Invalid URL: ${urlStr}`)); return; }
     const transport = url.protocol === "https:" ? https : http;
     const headers = {};
     if (HERMES_API_KEY) headers["Authorization"] = `Bearer ${HERMES_API_KEY}`;
     const req = transport.request(
-      { hostname: url.hostname, port: url.port ? parseInt(url.port, 10) : (url.protocol === "https:" ? 443 : 80),
-        path: url.pathname + (url.search || ""), method: "GET", headers },
+      {
+        hostname: url.hostname,
+        port: url.port ? parseInt(url.port, 10) : (url.protocol === "https:" ? 443 : 80),
+        path: url.pathname + (url.search || ""),
+        method: "GET",
+        headers,
+      },
       resolve
     );
     req.on("error", reject);
@@ -128,462 +159,59 @@ async function readJsonBody(res) {
   return JSON.parse(raw);
 }
 
-// WebSocket message handler for Claw3D gateway protocol
-async function handleClaw3DMessage(ws, message) {
-  let parsed;
-  try {
-    parsed = JSON.parse(message);
-  } catch (err) {
-    ws.send(JSON.stringify({
-      type: "res",
-      id: msgId || "unknown",
-      ok: false,
-      error: { code: "invalid_json", message: "Invalid JSON format" }
-    }));
-    return;
-  }
+// ---------------------------------------------------------------------------
+// Utility
+// ---------------------------------------------------------------------------
+function uuid() { return crypto.randomUUID(); }
+function now() { return new Date().toISOString(); }
+function nowMs() { return Date.now(); }
 
-  const { type, id, method, params } = parsed;
-  const msgId = id || null;
-
-  // Handle different message types
-  if (type === "req") {
-    await handleRequest(ws, msgId, method, params);
-  } else if (type === "res") {
-    // Response messages are handled by the caller
-  } else {
-    ws.send(JSON.stringify({
-      type: "res",
-      id: msgId,
-      ok: false,
-      error: { code: "unknown_message_type", message: `Unknown message type: ${type}` }
-    }));
-  }
-}
-
-async function handleRequest(ws, msgId, method, params) {
-  try {
-    let result;
-    
-    switch (method) {
-      case "hello":
-        result = await handleHello(params);
-        break;
-      case "agent.list":
-        result = await handleAgentList(params);
-        break;
-      case "agent.create":
-        result = await handleAgentCreate(params);
-        break;
-      case "agent.get":
-        result = await handleAgentGet(params);
-        break;
-      case "agent.update":
-        result = await handleAgentUpdate(params);
-        break;
-      case "agent.delete":
-        result = await handleAgentDelete(params);
-        break;
-      case "session.list":
-        result = await handleSessionList(params);
-        break;
-      case "session.create":
-        result = await handleSessionCreate(params);
-        break;
-      case "session.get":
-        result = await handleSessionGet(params);
-        break;
-      case "session.update":
-        result = await handleSessionUpdate(params);
-        break;
-      case "session.delete":
-        result = await handleSessionDelete(params);
-        break;
-      case "chat.send":
-        result = await handleChatSend(params);
-        break;
-      case "chat.abort":
-        result = await handleChatAbort(params);
-        break;
-      case "config.get":
-        result = await handleConfigGet(params);
-        break;
-      case "config.set":
-        result = await handleConfigSet(params);
-        break;
-      case "config.patch":
-        result = await handleConfigPatch(params);
-        break;
-      default:
-        throw new Error(`Unknown method: ${method}`);
-    }
-    
-    ws.send(JSON.stringify({
-      type: "res",
-      id: msgId,
-      ok: true,
-      result: result
-    }));
-    
-  } catch (error) {
-    console.error(`[hermes-direct-gateway] Error handling ${method}:`, error);
-    ws.send(JSON.stringify({
-      type: "res",
-      id: msgId,
-      ok: false,
-      error: { 
-        code: "internal_error", 
-        message: error.message || "Unknown error" 
-      }
-    }));
-  }
-}
-
-// Method handlers
-async function handleHello(params) {
-  return {
-    agentId: AGENT_ID,
-    agentName: AGENT_NAME,
-    version: "0.1.0",
-    capabilities: [
-      "agent.list", "agent.create", "agent.get", "agent.update", "agent.delete",
-      "session.list", "session.create", "session.get", "session.update", "session.delete",
-      "chat.send", "chat.abort",
-      "config.get", "config.set", "config.patch"
-    ]
-  };
-}
-
-async function handleAgentList(params) {
-  const agents = [];
-  for (const [id, info] of agentRegistry.entries()) {
-    agents.push({
-      id: info.id,
-      name: info.name,
-      model: info.model,
-      role: info.role || "",
-      activeSessionCount: 1 // Simplified
-    });
-  }
-  return { agents };
-}
-
-async function handleAgentCreate(params) {
-  const { name, role, model, instructions } = params || {};
-  const agentId = `agent_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  
-  const agentInfo = {
-    id: agentId,
-    name: name || `Agent ${agentId}`,
-    model: model || MODEL,
-    role: role || "Specialist",
-    systemPrompt: instructions || `You are a helpful AI agent.`,
-    sessionKey: `agent:${agentId}:main`
-  };
-  
-  agentRegistry.set(agentId, agentInfo);
-  conversationHistory.set(agentInfo.sessionKey, []);
-  
-  // Broadcast agent creation
-  broadcastEvent({
-    type: "event",
-    event: "agent.created",
-    agent: {
-      id: agentInfo.id,
-      name: agentInfo.name,
-      model: agentInfo.model,
-      role: agentInfo.role
-    }
-  });
-  
-  return { agentId: agentInfo.id };
-}
-
-async function handleAgentGet(params) {
-  const { agentId } = params || {};
-  const agentInfo = agentRegistry.get(agentId);
-  if (!agentInfo) {
-    throw new Error(`Agent not found: ${agentId}`);
-  }
-  return {
-    id: agentInfo.id,
-    name: agentInfo.name,
-    model: agentInfo.model,
-    role: agentInfo.role || "",
-    systemPrompt: agentInfo.systemPrompt || ""
-  };
-}
-
-async function handleAgentUpdate(params) {
-  const { agentId, name, role, model, instructions } = params || {};
-  const agentInfo = agentRegistry.get(agentId);
-  if (!agentInfo) {
-    throw new Error(`Agent not found: ${agentId}`);
-  }
-  
-  if (name !== undefined) agentInfo.name = name;
-  if (role !== undefined) agentInfo.role = role;
-  if (model !== undefined) agentInfo.model = model;
-  if (instructions !== undefined) agentInfo.systemPrompt = instructions;
-  
-  return { success: true };
-}
-
-async function handleAgentDelete(params) {
-  const { agentId } = params || {};
-  if (!agentRegistry.has(agentId)) {
-    throw new Error(`Agent not found: ${agentId}`);
-  }
-  
-  // Don't allow deleting the main Hermes agent
-  if (agentId === AGENT_ID) {
-    throw new Error(`Cannot delete the main Hermes agent`);
-  }
-  
-  agentRegistry.delete(agentId);
-  conversationHistory.delete(`agent:${agentId}:main`);
-  
-  // Broadcast agent deletion
-  broadcastEvent({
-    type: "event",
-    event: "agent.deleted",
-    agentId
-  });
-  
-  return { success: true };
-}
-
-async function handleSessionList(params) {
-  const sessions = [];
-  for (const [sessionKey, messages] of conversationHistory.entries()) {
-    // Extract agentId from sessionKey: agent:{agentId}:{sessionKey}
-    const match = sessionKey.match(/^agent:(.+):.+$/);
-    if (match) {
-      const agentId = match[1];
-      const agentInfo = agentRegistry.get(agentId);
-      sessions.push({
-        id: sessionKey,
-        agentId: agentId,
-        agentName: agentInfo ? agentInfo.name : "Unknown",
-        messageCount: messages.length,
-        updatedAt: new Date().toISOString() // Simplified
-      });
-    }
-  }
-  return { sessions };
-}
-
-async function handleSessionCreate(params) {
-  const { agentId, sessionKey } = params || {};
-  const targetSessionKey = sessionKey || `agent:${agentId || AGENT_ID}:main`;
-  
-  if (!conversationHistory.has(targetSessionKey)) {
-    conversationHistory.set(targetSessionKey, []);
-    
-    // If this is a new agent, make sure it's registered
-    if (agentId && !agentRegistry.has(agentId)) {
-      await handleAgentCreate({ 
-        name: agentId.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase()),
-        role: "Specialist"
-      });
-    }
-  }
-  
-  return { sessionKey: targetSessionKey };
-}
-
-async function handleSessionGet(params) {
-  const { sessionKey } = params || {};
-  const messages = conversationHistory.get(sessionKey) || [];
-  return {
-    sessionKey: sessionKey || "",
-    messages: messages.map(msg => ({
-      id: msg.id || `${Date.now()}_${Math.random()}`,
-      role: msg.role || "user",
-      content: msg.content || "",
-      createdAt: msg.createdAt || new Date().toISOString()
-    }))
-  };
-}
-
-async function handleSessionUpdate(params) {
-  // For now, session updates are not implemented
-  return { success: true };
-}
-
-async function handleSessionDelete(params) {
-  const { sessionKey } = params || {};
-  if (conversationHistory.has(sessionKey)) {
-    conversationHistory.delete(sessionKey);
-    
-    // Broadcast session deletion
-    broadcastEvent({
-      type: "event",
-      event: "session.deleted",
-      sessionKey
-    });
-  }
-  
-  return { success: true };
-}
-
-async function handleChatSend(params) {
-  const { sessionKey, content, agentId = AGENT_ID, model = MODEL } = params || {};
-  
-  // Get or create session
-  if (!conversationHistory.has(sessionKey)) {
-    await handleSessionCreate({ agentId, sessionKey });
-  }
-  
-  const messages = conversationHistory.get(sessionKey);
-  
-  // Add user message
-  const userMessage = {
-    id: `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-    role: "user",
-    content: content,
-    createdAt: new Date().toISOString()
-  };
-  messages.push(userMessage);
-  
-  // Get conversation history for context
-  const recentMessages = messages.slice(-10); // Last 10 messages for context
-  
-  // Prepare messages for Hermes API
-  const hermesMessages = [
-    { role: "system", content: agentRegistry.get(agentId)?.systemPrompt || "You are a helpful AI agent." }
-  ];
-  
-  for (const msg of recentMessages) {
-    hermesMessages.push({
-      role: msg.role,
-      content: msg.content
-    });
-  }
-  
-  // Call Hermes API
-  const hermesResponse = await hermesPost("/v1/chat/completions", {
-    model: model,
-    messages: hermesMessages,
-    stream: false
-  });
-  
-  const hermesResult = await readJsonBody(hermesResponse);
-  
-  if (hermesResponse.statusCode >= 400) {
-    throw new Error(`Hermes API error: ${hermesResponse.statusCode}`);
-  }
-  
-  const assistantContent = hermesResult.choices?.[0]?.message?.content || "";
-  
-  // Add assistant message
-  const assistantMessage = {
-    id: `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-    role: "assistant",
-    content: assistantContent,
-    createdAt: new Date().toISOString()
-  };
-  messages.push(assistantMessage);
-  
-  // Persist history
-  await persistHistory();
-  
-  // Broadcast new message
-  broadcastEvent({
-    type: "event",
-    event: "message.created",
-    sessionKey,
-    message: assistantMessage
-  });
-  
-  return {
-    messageId: assistantMessage.id,
-    sessionKey,
-    content: assistantContent
-  };
-}
-
-async function handleChatAbort(params) {
-  // Simplified - in a real implementation this would cancel active generations
-  return { success: true };
-}
-
-async function handleConfigGet(params) {
-  const { key } = params || {};
-  
-  // Return basic gateway config
-  if (key === "gateway") {
-    return {
-      url: `ws://${require("node:os").hostname()}:${GATEWAY_PORT}`,
-      token: HERMES_API_KEY || "",
-      adapterType: "hermes"
-    };
-  }
-  
-  return {};
-}
-
-async function handleConfigSet(params) {
-  // Configuration setting is not supported in this direct gateway
-  return { success: false, message: "Configuration not mutable in direct gateway mode" };
-}
-
-async function handleConfigPatch(params) {
-  // Configuration patching is not supported in this direct gateway
-  return { success: false, message: "Configuration not mutable in direct gateway mode" };
-}
-
+// ---------------------------------------------------------------------------
 // Event broadcasting
+// ---------------------------------------------------------------------------
 function broadcastEvent(event) {
   const message = JSON.stringify(event);
   for (const sendFn of activeSendEventFns) {
-    try {
-      sendFn(message);
-    } catch (err) {
-      // Remove broken send functions
-      activeSendEventFns.delete(sendFn);
-    }
+    try { sendFn(message); } catch { activeSendEventFns.delete(sendFn); }
   }
 }
 
-// Persist conversation history to disk
-async function persistHistory() {
+// ---------------------------------------------------------------------------
+// Persistence helpers
+// ---------------------------------------------------------------------------
+function persistHistory() {
   try {
     const data = {};
     for (const [key, messages] of conversationHistory.entries()) {
       if (messages.length > 0) {
-        data[key] = messages.map(msg => ({
+        data[key] = messages.map((msg) => ({
           id: msg.id,
           role: msg.role,
           content: msg.content,
-          createdAt: msg.createdAt
+          createdAt: msg.createdAt,
         }));
       }
     }
-    
-    const historyDir = path.join(require("node:os").homedir(), ".hermes");
+    const historyDir = path.join(os.homedir(), ".hermes");
     fs.mkdirSync(historyDir, { recursive: true });
-    const historyFile = path.join(historyDir, "clawd3d-history.json");
-    fs.writeFileSync(historyFile, JSON.stringify(data, null, 2));
+    fs.writeFileSync(path.join(historyDir, "clawd3d-history.json"), JSON.stringify(data, null, 2));
   } catch (err) {
-    console.warn("[hermes-direct-gateway] Failed to persist history:", err);
+    console.warn("[hermes-direct-gateway] Failed to persist history:", err.message);
   }
 }
 
-// Load conversation history from disk
 function loadHistoryFromDisk() {
   try {
-    const historyDir = path.join(require("node:os").homedir(), ".hermes");
-    const historyFile = path.join(historyDir, "clawd3d-history.json");
+    const historyFile = path.join(os.homedir(), ".hermes", "clawd3d-history.json");
     if (fs.existsSync(historyFile)) {
       const raw = fs.readFileSync(historyFile, "utf8");
       const data = JSON.parse(raw);
       if (data && typeof data === "object") {
         for (const [key, messages] of Object.entries(data)) {
           if (Array.isArray(messages)) {
-            conversationHistory.set(key, messages.map(msg => ({
+            conversationHistory.set(key, messages.map((msg) => ({
               ...msg,
-              createdAt: msg.createdAt || new Date().toISOString()
+              createdAt: msg.createdAt || now(),
             })));
           }
         }
@@ -591,66 +219,792 @@ function loadHistoryFromDisk() {
       }
     }
   } catch (err) {
-    console.warn("[hermes-direct-gateway] Could not load history:", err);
+    console.warn("[hermes-direct-gateway] Could not load history:", err.message);
   }
 }
 
-// WebSocket server setup
-function startWebSocketServer() {
-  const wss = new WebSocketServer({
-    port: GATEWAY_PORT,
-    host: HOST,
-    // Per-message deflate is off by default; set to true to enable
-    // perMessageDeflate: false
+// ---------------------------------------------------------------------------
+// Build the list of all supported methods
+// ---------------------------------------------------------------------------
+const ALL_METHODS = [
+  "connect",
+  "agents.list", "agents.create", "agents.update", "agents.delete",
+  "agents.files.get", "agents.files.set",
+  "sessions.list", "sessions.patch", "sessions.preview", "sessions.reset", "sessions.usage",
+  "chat.send", "chat.abort", "chat.history",
+  "config.get", "config.set", "config.patch",
+  "status", "wake",
+  "agent.wait",
+  "exec.approvals.get", "exec.approvals.set", "exec.approval.resolve",
+  "models.list",
+  "tasks.list", "tasks.create", "tasks.update", "tasks.delete",
+  "usage.cost",
+  "skills.status", "skills.install", "skills.update",
+  "cron.list", "cron.add", "cron.remove", "cron.run",
+];
+
+const ALL_EVENTS = [
+  "connect.challenge",
+  "agent", "chat", "presence", "heartbeat", "object",
+  "playbook_triggered", "task_archived", "task_deleted",
+  "exec.approval.requested",
+];
+
+// ---------------------------------------------------------------------------
+// Method handlers
+// ---------------------------------------------------------------------------
+
+// 1. connect  ---------------------------------------------------------------
+async function handleConnect(params) {
+  // Return hello-ok shaped payload
+  return {
+    type: "hello-ok",
+    protocol: 3,
+    adapterType: "hermes",
+    features: {
+      methods: ALL_METHODS,
+      events: ALL_EVENTS,
+    },
+    snapshot: {
+      health: {
+        defaultAgentId: AGENT_ID,
+        agents: Array.from(agentRegistry.values()).map((a) => ({
+          agentId: a.id,
+          name: a.name,
+          isDefault: a.id === AGENT_ID,
+        })),
+      },
+      sessionDefaults: {
+        mainKey: "main",
+        scope: "default",
+      },
+    },
+    auth: {
+      deviceToken: params?.auth?.token || params?.device?.id || "",
+      role: "operator",
+      scopes: ["operator.admin", "operator.approvals", "operator.pairing"],
+      issuedAtMs: nowMs(),
+    },
+    policy: { tickIntervalMs: 30000 },
+  };
+}
+
+// 2. agents.list  -----------------------------------------------------------
+async function handleAgentsList(_params) {
+  const agents = [];
+  for (const [, info] of agentRegistry.entries()) {
+    agents.push({
+      id: info.id,
+      name: info.name,
+      identity: {
+        name: info.name,
+        theme: "default",
+        emoji: info.id === AGENT_ID ? "🏛️" : "🤖",
+      },
+    });
+  }
+  return {
+    defaultId: AGENT_ID,
+    mainKey: "main",
+    scope: "default",
+    agents,
+  };
+}
+
+// 3. agents.create  ---------------------------------------------------------
+async function handleAgentsCreate(params) {
+  const { name, workspace } = params || {};
+  const slug = (name || "agent")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || `agent-${Date.now()}`;
+  const agentId = slug;
+  const agentInfo = {
+    id: agentId,
+    name: name || `Agent ${agentId}`,
+    model: MODEL,
+    role: "Specialist",
+    workspace: workspace || path.join(os.homedir(), ".hermes", `workspace-${slug}`),
+    systemPrompt: `You are ${name || agentId}, a helpful AI agent.`,
+    sessionKey: `agent:${agentId}:main`,
+  };
+  agentRegistry.set(agentId, agentInfo);
+  conversationHistory.set(agentInfo.sessionKey, []);
+
+  broadcastEvent({
+    type: "event",
+    event: "agent",
+    seq: ++seqCounter,
+    payload: { action: "created", agentId: agentInfo.id, name: agentInfo.name },
   });
+
+  return { ok: true, agentId: agentInfo.id, name: agentInfo.name, workspace: agentInfo.workspace };
+}
+
+// 4. agents.update  ---------------------------------------------------------
+async function handleAgentsUpdate(params) {
+  const { agentId, name } = params || {};
+  const info = agentRegistry.get(agentId);
+  if (!info) throw new Error(`Agent not found: ${agentId}`);
+  if (name !== undefined) info.name = name;
+  return { ok: true, agentId: info.id, name: info.name };
+}
+
+// 5. agents.delete  ---------------------------------------------------------
+async function handleAgentsDelete(params) {
+  const { agentId } = params || {};
+  if (!agentRegistry.has(agentId)) throw new Error(`Agent not found: ${agentId}`);
+  if (agentId === AGENT_ID) throw new Error("Cannot delete the main Hermes agent");
+  agentRegistry.delete(agentId);
+  // Clean up sessions
+  for (const key of conversationHistory.keys()) {
+    if (key.startsWith(`agent:${agentId}:`)) conversationHistory.delete(key);
+  }
+  broadcastEvent({
+    type: "event",
+    event: "agent",
+    seq: ++seqCounter,
+    payload: { action: "deleted", agentId },
+  });
+  return { ok: true, removedBindings: 0 };
+}
+
+// 6. agents.files.get  ------------------------------------------------------
+async function handleAgentsFilesGet(params) {
+  const { agentId, name } = params || {};
+  const key = `${agentId}:${name}`;
+  const content = agentFiles.get(key);
+  const info = agentRegistry.get(agentId);
+  if (content !== undefined) {
+    return {
+      workspace: info?.workspace || null,
+      file: { missing: false, content, path: `${info?.workspace || ""}/${name}` },
+    };
+  }
+  return {
+    workspace: info?.workspace || null,
+    file: { missing: true, content: "", path: null },
+  };
+}
+
+// 7. agents.files.set  ------------------------------------------------------
+async function handleAgentsFilesSet(params) {
+  const { agentId, name, content } = params || {};
+  const key = `${agentId}:${name}`;
+  agentFiles.set(key, content || "");
+  return { ok: true };
+}
+
+// 8. sessions.list  ---------------------------------------------------------
+async function handleSessionsList(params) {
+  const { agentId, limit = 50 } = params || {};
+  const sessions = [];
+  for (const [sessionKey, messages] of conversationHistory.entries()) {
+    if (agentId) {
+      const match = sessionKey.match(/^agent:([^:]+):/);
+      if (match && match[1] !== agentId) continue;
+    }
+    sessions.push({
+      key: sessionKey,
+      updatedAt: messages.length > 0 ? nowMs() : null,
+      origin: { label: null },
+    });
+    if (sessions.length >= limit) break;
+  }
+  return { sessions };
+}
+
+// 9. sessions.patch  --------------------------------------------------------
+async function handleSessionsPatch(params) {
+  const { key } = params || {};
+  if (!key) throw new Error("Session key is required.");
+  // Accept the patch but Hermes doesn't really use per-session model settings
+  return {
+    ok: true,
+    key,
+    entry: {
+      thinkingLevel: params?.thinkingLevel || undefined,
+    },
+    resolved: {
+      modelProvider: "hermes",
+      model: MODEL,
+    },
+  };
+}
+
+// 10. sessions.preview  -----------------------------------------------------
+async function handleSessionsPreview(params) {
+  const { keys = [], limit = 8, maxChars = 240 } = params || {};
+  const previews = [];
+  for (const key of keys) {
+    const messages = conversationHistory.get(key) || [];
+    const recent = messages.slice(-limit);
+    const items = recent.map((msg) => ({
+      role: msg.role,
+      text: (msg.content || "").slice(0, maxChars),
+    }));
+    const lastMsg = messages[messages.length - 1];
+    previews.push({
+      key,
+      status: "idle",
+      items,
+    });
+  }
+  return { previews };
+}
+
+// 11. sessions.reset  -------------------------------------------------------
+async function handleSessionsReset(params) {
+  const { key } = params || {};
+  if (key && conversationHistory.has(key)) {
+    conversationHistory.set(key, []);
+    persistHistory();
+  }
+  return { ok: true };
+}
+
+// 12. sessions.usage  -------------------------------------------------------
+async function handleSessionsUsage(params) {
+  // Stub – Hermes doesn't track per-session usage
+  return { sessions: [] };
+}
+
+// 13. chat.send  ------------------------------------------------------------
+async function handleChatSend(params) {
+  const {
+    sessionKey,
+    message,
+    content,
+    agentId: requestedAgentId,
+    deliver = true,
+    idempotencyKey,
+  } = params || {};
+
+  const userContent = message || content || "";
+  const resolvedAgentId = requestedAgentId ||
+    (sessionKey ? (sessionKey.match(/^agent:([^:]+):/) || [])[1] : null) ||
+    AGENT_ID;
+  const resolvedSessionKey = sessionKey || `agent:${resolvedAgentId}:main`;
+  const runId = idempotencyKey || uuid();
+
+  // Get or create session
+  if (!conversationHistory.has(resolvedSessionKey)) {
+    conversationHistory.set(resolvedSessionKey, []);
+  }
+  const messages = conversationHistory.get(resolvedSessionKey);
+
+  // Add user message
+  const userMessage = {
+    id: `msg_${uuid()}`,
+    role: "user",
+    content: userContent,
+    createdAt: now(),
+  };
+  messages.push(userMessage);
+
+  // Build context for Hermes
+  const recentMessages = messages.slice(-10);
+  const agentInfo = agentRegistry.get(resolvedAgentId);
+  const hermesMessages = [
+    { role: "system", content: agentInfo?.systemPrompt || "You are a helpful AI agent." },
+  ];
+  for (const msg of recentMessages) {
+    hermesMessages.push({ role: msg.role, content: msg.content });
+  }
+
+  // Call Hermes API
+  let assistantContent = "";
+  try {
+    const hermesResponse = await hermesPost("/v1/chat/completions", {
+      model: agentInfo?.model || MODEL,
+      messages: hermesMessages,
+      stream: false,
+    });
+    const hermesResult = await readJsonBody(hermesResponse);
+    if (hermesResponse.statusCode >= 400) {
+      throw new Error(`Hermes API error: ${hermesResponse.statusCode}`);
+    }
+    assistantContent = hermesResult.choices?.[0]?.message?.content || "";
+  } catch (err) {
+    console.error("[hermes-direct-gateway] Hermes API error:", err.message);
+    assistantContent = `[Gateway error: ${err.message}]`;
+  }
+
+  // Add assistant message
+  const assistantMessage = {
+    id: `msg_${uuid()}`,
+    role: "assistant",
+    content: assistantContent,
+    createdAt: now(),
+  };
+  messages.push(assistantMessage);
+  persistHistory();
+
+  // Broadcast chat event
+  broadcastEvent({
+    type: "event",
+    event: "chat",
+    seq: ++seqCounter,
+    payload: {
+      sessionKey: resolvedSessionKey,
+      message: assistantMessage,
+      runId,
+    },
+  });
+
+  return {
+    ok: true,
+    runId,
+    messageId: assistantMessage.id,
+    sessionKey: resolvedSessionKey,
+    content: assistantContent,
+  };
+}
+
+// 14. chat.abort  -----------------------------------------------------------
+async function handleChatAbort(_params) {
+  return { ok: true };
+}
+
+// 15. chat.history  ---------------------------------------------------------
+async function handleChatHistory(params) {
+  const { sessionKey, limit = 50 } = params || {};
+  const messages = conversationHistory.get(sessionKey) || [];
+  const recent = messages.slice(-limit);
+  return {
+    sessionKey: sessionKey || "",
+    messages: recent.map((msg) => ({
+      id: msg.id || uuid(),
+      role: msg.role,
+      content: msg.content || "",
+      createdAt: msg.createdAt || now(),
+    })),
+  };
+}
+
+// 16. config.get  -----------------------------------------------------------
+async function handleConfigGet(_params) {
+  return {
+    config: configData,
+    hash: configHash,
+    exists: Object.keys(configData).length > 0,
+    path: configPath,
+  };
+}
+
+// 17. config.set  -----------------------------------------------------------
+async function handleConfigSet(params) {
+  const { raw, baseHash } = params || {};
+  if (baseHash && baseHash !== configHash && Object.keys(configData).length > 0) {
+    throw Object.assign(new Error("Config changed since last load; re-run config.get."), { code: "CONFLICT" });
+  }
+  try {
+    configData = typeof raw === "string" ? JSON.parse(raw) : (raw || {});
+  } catch {
+    configData = {};
+  }
+  configHash = crypto.randomUUID();
+  return { ok: true, hash: configHash };
+}
+
+// 18. config.patch  ---------------------------------------------------------
+async function handleConfigPatch(params) {
+  const { raw, baseHash } = params || {};
+  if (baseHash && baseHash !== configHash && Object.keys(configData).length > 0) {
+    throw Object.assign(new Error("Config changed since last load; re-run config.get."), { code: "CONFLICT" });
+  }
+  let patch = {};
+  try {
+    patch = typeof raw === "string" ? JSON.parse(raw) : (raw || {});
+  } catch {
+    patch = {};
+  }
+  // Deep merge (shallow 2 levels)
+  for (const [k, v] of Object.entries(patch)) {
+    if (v && typeof v === "object" && !Array.isArray(v) && configData[k] && typeof configData[k] === "object") {
+      configData[k] = { ...configData[k], ...v };
+    } else {
+      configData[k] = v;
+    }
+  }
+  configHash = crypto.randomUUID();
+  return { ok: true, hash: configHash };
+}
+
+// 19. status  ---------------------------------------------------------------
+async function handleStatus(_params) {
+  const agents = [];
+  for (const [, info] of agentRegistry.entries()) {
+    agents.push({
+      agentId: info.id,
+      name: info.name,
+      enabled: true,
+      every: "30m",
+      everyMs: 1800000,
+    });
+  }
+  return {
+    heartbeat: { agents },
+    uptime: process.uptime(),
+    version: "0.1.0",
+    adapterType: "hermes",
+  };
+}
+
+// 20. wake  -----------------------------------------------------------------
+async function handleWake(params) {
+  // Trigger a heartbeat / no-op for Hermes
+  return { ok: true };
+}
+
+// 21. agent.wait  -----------------------------------------------------------
+async function handleAgentWait(params) {
+  const { runId, timeoutMs = 30000 } = params || {};
+  // The agent run completes synchronously in our chat.send, so just return immediately
+  return { ok: true, runId, status: "completed" };
+}
+
+// 22. exec.approvals.get  ---------------------------------------------------
+async function handleExecApprovalsGet(_params) {
+  return {
+    path: path.join(os.homedir(), ".hermes", "exec-approvals.json"),
+    exists: true,
+    hash: execApprovalsHash,
+    file: execApprovalsData,
+  };
+}
+
+// 23. exec.approvals.set  ---------------------------------------------------
+async function handleExecApprovalsSet(params) {
+  const { file, baseHash } = params || {};
+  if (baseHash && baseHash !== execApprovalsHash) {
+    throw Object.assign(new Error("Exec approvals changed since last load; re-run exec.approvals.get."), { code: "CONFLICT" });
+  }
+  if (file) {
+    Object.assign(execApprovalsData, file);
+  }
+  execApprovalsHash = crypto.randomUUID();
+  return { ok: true, hash: execApprovalsHash };
+}
+
+// 24. exec.approval.resolve  ------------------------------------------------
+async function handleExecApprovalResolve(params) {
+  const { id, decision } = params || {};
+  // In Hermes mode there's no sandboxed execution needing approval,
+  // so just acknowledge.
+  return { ok: true, id, decision };
+}
+
+// 25. models.list  ----------------------------------------------------------
+async function handleModelsList(_params) {
+  // Try to query Hermes for available models, fall back to defaults
+  try {
+    const res = await hermesGet("/v1/models");
+    const body = await readJsonBody(res);
+    if (Array.isArray(body?.data)) {
+      return {
+        models: body.data.map((m) => ({
+          id: m.id || "hermes",
+          name: m.id || "Hermes",
+          provider: "hermes",
+          contextWindow: 128000,
+          reasoning: false,
+        })),
+      };
+    }
+  } catch { /* fall through */ }
+  return {
+    models: [
+      { id: MODEL, name: AGENT_NAME, provider: "hermes", contextWindow: 128000, reasoning: false },
+    ],
+  };
+}
+
+// 26. tasks.list  -----------------------------------------------------------
+async function handleTasksList(_params) {
+  return { tasks: Array.from(tasks.values()) };
+}
+
+// 27. tasks.create  ---------------------------------------------------------
+async function handleTasksCreate(params) {
+  const taskId = uuid();
+  const task = {
+    id: taskId,
+    ...params,
+    status: "pending",
+    createdAt: now(),
+    updatedAt: now(),
+  };
+  tasks.set(taskId, task);
+  return task;
+}
+
+// 28. tasks.update  ---------------------------------------------------------
+async function handleTasksUpdate(params) {
+  const { id } = params || {};
+  const task = tasks.get(id);
+  if (!task) throw new Error(`Task not found: ${id}`);
+  Object.assign(task, params, { updatedAt: now() });
+  return task;
+}
+
+// 29. tasks.delete  ---------------------------------------------------------
+async function handleTasksDelete(params) {
+  const { id } = params || {};
+  const existed = tasks.delete(id);
+  return { ok: true, removed: existed };
+}
+
+// 30. usage.cost  -----------------------------------------------------------
+async function handleUsageCost(_params) {
+  // Stub — Hermes doesn't track billing
+  return {
+    totalCost: 0,
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    totalTokens: 0,
+    daily: [],
+  };
+}
+
+// 31. skills.status  --------------------------------------------------------
+async function handleSkillsStatus(params) {
+  return { skills: [], agentId: params?.agentId || AGENT_ID };
+}
+
+// 32. skills.install  -------------------------------------------------------
+async function handleSkillsInstall(params) {
+  return { ok: true, skillKey: params?.packageId || "unknown", installed: true };
+}
+
+// 33. skills.update  --------------------------------------------------------
+async function handleSkillsUpdate(params) {
+  return { ok: true, skillKey: params?.packageId || "unknown", updated: true };
+}
+
+// 34. cron.list  ------------------------------------------------------------
+async function handleCronList(_params) {
+  // Return properly shaped CronJobSummary objects
+  const jobs = Array.from(cronJobs.values()).map((job) => ({
+    id: job.id,
+    name: job.name || "Untitled Job",
+    agentId: job.agentId || AGENT_ID,
+    sessionKey: job.sessionKey || null,
+    description: job.description || "",
+    enabled: job.enabled !== false,
+    deleteAfterRun: job.deleteAfterRun || false,
+    updatedAtMs: job.updatedAtMs || Date.now(),
+    schedule: job.schedule || { kind: "every", everyMs: 3600000 },
+    sessionTarget: job.sessionTarget || "main",
+    wakeMode: job.wakeMode || "next-heartbeat",
+    payload: job.payload || { kind: "systemEvent", text: job.command || "" },
+    state: job.state || {
+      nextRunAtMs: undefined,
+      runningAtMs: undefined,
+      lastRunAtMs: undefined,
+      lastStatus: undefined,
+      lastError: undefined,
+      lastDurationMs: undefined,
+    },
+    delivery: job.delivery || undefined,
+  }));
+  return { jobs };
+}
+
+// 35. cron.add  -------------------------------------------------------------
+async function handleCronAdd(params) {
+  const cronId = uuid();
+  const job = {
+    id: cronId,
+    name: params?.name || "Untitled Job",
+    agentId: params?.agentId || AGENT_ID,
+    sessionKey: params?.sessionKey || null,
+    description: params?.description || "",
+    enabled: params?.enabled !== false,
+    deleteAfterRun: params?.deleteAfterRun || false,
+    updatedAtMs: Date.now(),
+    schedule: params?.schedule || { kind: "every", everyMs: 3600000 },
+    sessionTarget: params?.sessionTarget || "main",
+    wakeMode: params?.wakeMode || "next-heartbeat",
+    payload: params?.payload || { kind: "systemEvent", text: "" },
+    state: {
+      nextRunAtMs: undefined,
+      runningAtMs: undefined,
+      lastRunAtMs: undefined,
+      lastStatus: undefined,
+      lastError: undefined,
+      lastDurationMs: undefined,
+    },
+    delivery: params?.delivery || undefined,
+  };
+  cronJobs.set(cronId, job);
+  return job;
+}
+
+// 36. cron.remove  ----------------------------------------------------------
+async function handleCronRemove(params) {
+  const { id } = params || {};
+  const existed = cronJobs.delete(id);
+  return { ok: true, removed: existed };
+}
+
+// 37. cron.run  -------------------------------------------------------------
+async function handleCronRun(params) {
+  return { ok: true, id: params?.id, status: "triggered" };
+}
+
+// ---------------------------------------------------------------------------
+// Method router
+// ---------------------------------------------------------------------------
+const METHOD_MAP = {
+  "connect":               handleConnect,
+  "agents.list":           handleAgentsList,
+  "agents.create":         handleAgentsCreate,
+  "agents.update":         handleAgentsUpdate,
+  "agents.delete":         handleAgentsDelete,
+  "agents.files.get":      handleAgentsFilesGet,
+  "agents.files.set":      handleAgentsFilesSet,
+  "sessions.list":         handleSessionsList,
+  "sessions.patch":        handleSessionsPatch,
+  "sessions.preview":      handleSessionsPreview,
+  "sessions.reset":        handleSessionsReset,
+  "sessions.usage":        handleSessionsUsage,
+  "chat.send":             handleChatSend,
+  "chat.abort":            handleChatAbort,
+  "chat.history":          handleChatHistory,
+  "config.get":            handleConfigGet,
+  "config.set":            handleConfigSet,
+  "config.patch":          handleConfigPatch,
+  "status":                handleStatus,
+  "wake":                  handleWake,
+  "agent.wait":            handleAgentWait,
+  "exec.approvals.get":    handleExecApprovalsGet,
+  "exec.approvals.set":    handleExecApprovalsSet,
+  "exec.approval.resolve": handleExecApprovalResolve,
+  "models.list":           handleModelsList,
+  "tasks.list":            handleTasksList,
+  "tasks.create":          handleTasksCreate,
+  "tasks.update":          handleTasksUpdate,
+  "tasks.delete":          handleTasksDelete,
+  "usage.cost":            handleUsageCost,
+  "skills.status":         handleSkillsStatus,
+  "skills.install":        handleSkillsInstall,
+  "skills.update":         handleSkillsUpdate,
+  "cron.list":             handleCronList,
+  "cron.add":              handleCronAdd,
+  "cron.remove":           handleCronRemove,
+  "cron.run":              handleCronRun,
+};
+
+// ---------------------------------------------------------------------------
+// WebSocket message handler
+// ---------------------------------------------------------------------------
+async function handleClaw3DMessage(ws, message) {
+  let parsed;
+  try {
+    parsed = JSON.parse(message);
+  } catch {
+    ws.send(JSON.stringify({
+      type: "res",
+      id: "unknown",
+      ok: false,
+      error: { code: "INVALID_JSON", message: "Invalid JSON format" },
+    }));
+    return;
+  }
+
+  const { type, id: msgId, method, params } = parsed;
+
+  if (type === "req") {
+    await handleRequest(ws, msgId, method, params || {});
+  } else if (type !== "res") {
+    ws.send(JSON.stringify({
+      type: "res",
+      id: msgId || null,
+      ok: false,
+      error: { code: "UNKNOWN_TYPE", message: `Unknown message type: ${type}` },
+    }));
+  }
+}
+
+async function handleRequest(ws, msgId, method, params) {
+  const handler = METHOD_MAP[method];
+  if (!handler) {
+    console.warn(`[hermes-direct-gateway] Unknown method: ${method}`);
+    ws.send(JSON.stringify({
+      type: "res",
+      id: msgId,
+      ok: false,
+      error: { code: "UNKNOWN_METHOD", message: `Unknown method: ${method}` },
+    }));
+    return;
+  }
+
+  try {
+    const result = await handler(params);
+    ws.send(JSON.stringify({
+      type: "res",
+      id: msgId,
+      ok: true,
+      payload: result,
+    }));
+  } catch (error) {
+    console.error(`[hermes-direct-gateway] Error handling ${method}:`, error.message);
+    ws.send(JSON.stringify({
+      type: "res",
+      id: msgId,
+      ok: false,
+      error: {
+        code: error.code || "INTERNAL_ERROR",
+        message: error.message || "Unknown error",
+      },
+    }));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket server
+// ---------------------------------------------------------------------------
+function startWebSocketServer() {
+  const wss = new WebSocketServer({ port: GATEWAY_PORT, host: HOST });
 
   wss.on("listening", () => {
     console.log(`[hermes-direct-gateway] WebSocket server listening on ${HOST}:${GATEWAY_PORT}`);
-    
-    // Show connection URLs
-    const protocol = "ws"; // Will be wss if behind SSL proxy
     const hostForDisplay = HOST === "0.0.0.0" || HOST === "::" ? "localhost" : HOST;
-    console.log(`[hermes-direct-gateway] Connect to: ${protocol}://${hostForDisplay}:${GATEWAY_PORT}`);
+    console.log(`[hermes-direct-gateway] Connect to: ws://${hostForDisplay}:${GATEWAY_PORT}`);
+    console.log(`[hermes-direct-gateway] Supported methods (${ALL_METHODS.length}): ${ALL_METHODS.join(", ")}`);
   });
 
   wss.on("connection", (ws, req) => {
     console.log(`[hermes-direct-gateway] New WebSocket connection from ${req.socket.remoteAddress}`);
-    
-    // Add broadcast function for this connection
+
     const sendFn = (message) => {
-      if (ws.readyState === WebSocket.OPEN) {
+      if (ws.readyState === 1 /* WebSocket.OPEN */) {
         ws.send(message);
       }
     };
     activeSendEventFns.add(sendFn);
-    
+
     ws.on("message", (data) => {
       handleClaw3DMessage(ws, data.toString());
     });
-    
+
     ws.on("close", () => {
       console.log(`[hermes-direct-gateway] WebSocket connection closed`);
       activeSendEventFns.delete(sendFn);
     });
-    
+
     ws.on("error", (err) => {
-      console.error(`[hermes-direct-gateway] WebSocket error:`, err);
+      console.error(`[hermes-direct-gateway] WebSocket error:`, err.message);
       activeSendEventFns.delete(sendFn);
     });
-    
-    // Send hello message immediately upon connection
-    ws.send(JSON.stringify({
-      type: "hello",
-      agentId: AGENT_ID,
-      agentName: AGENT_NAME,
-      version: "0.1.0",
-      capabilities: [
-        "agent.list", "agent.create", "agent.get", "agent.update", "agent.delete",
-        "session.list", "session.create", "session.get", "session.update", "session.delete",
-        "chat.send", "chat.abort",
-        "config.get", "config.set", "config.patch"
-      ]
-    }));
+
+    // NOTE: We do NOT send a hello frame on connection.
+    // The OpenClaw protocol v3 requires the client to send a "connect"
+    // request first (possibly after a connect.challenge exchange), and the
+    // server responds with the hello-ok payload in the "res" frame.
+    // Sending an unsolicited "hello" frame would confuse the client.
   });
 
   wss.on("error", (err) => {
@@ -660,7 +1014,9 @@ function startWebSocketServer() {
   return wss;
 }
 
+// ---------------------------------------------------------------------------
 // Graceful shutdown
+// ---------------------------------------------------------------------------
 process.on("SIGINT", () => {
   console.log("\n[hermes-direct-gateway] Shutting down gracefully...");
   process.exit(0);
@@ -671,17 +1027,14 @@ process.on("SIGTERM", () => {
   process.exit(0);
 });
 
-// Start the gateway
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
 function main() {
-  // Load persisted history
   loadHistoryFromDisk();
-  
-  // Start WebSocket server
-  const wss = startWebSocketServer();
-  
+  startWebSocketServer();
   console.log(`[hermes-direct-gateway] Hermes Direct Gateway is ready!`);
   console.log(`[hermes-direct-gateway] Configure Claw3D to connect to: ws://${HOST}:${GATEWAY_PORT}`);
-  console.log(`[hermes-direct-gateway] For WSS access, place behind SSL proxy (like NGINX)`);
 }
 
 main();

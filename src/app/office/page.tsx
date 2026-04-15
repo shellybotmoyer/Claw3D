@@ -1,15 +1,7 @@
-import { Suspense } from "react";
+"use client";
+
+import dynamic from "next/dynamic";
 import { RunningAvatarLoader } from "@/features/agents/components/RunningAvatarLoader";
-import { AgentStoreProvider } from "@/features/agents/state/store";
-import { OfficeScreen } from "@/features/office/screens/OfficeScreen";
-
-const ENABLED_RE = /^(1|true|yes|on)$/i;
-
-const readDebugFlag = (value: string | undefined): boolean => {
-  const normalized = (value ?? "").trim();
-  if (!normalized) return true;
-  return ENABLED_RE.test(normalized);
-};
 
 function OfficeLoadingFallback() {
   return (
@@ -30,14 +22,11 @@ function OfficeLoadingFallback() {
   );
 }
 
-export default function OfficePage() {
-  const showOpenClawConsole = readDebugFlag(process.env.DEBUG);
+const OfficePageClient = dynamic(() => import("./OfficePageClient"), {
+  ssr: false,
+  loading: () => <OfficeLoadingFallback />,
+});
 
-  return (
-    <AgentStoreProvider>
-      <Suspense fallback={<OfficeLoadingFallback />}>
-        <OfficeScreen showOpenClawConsole={showOpenClawConsole} />
-      </Suspense>
-    </AgentStoreProvider>
-  );
+export default function OfficePage() {
+  return <OfficePageClient />;
 }
