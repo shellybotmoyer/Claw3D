@@ -6,7 +6,6 @@ import type {
 } from "@/lib/gateway/GatewayClient";
 import type { GatewayClient } from "@/lib/gateway/GatewayClient";
 import {
-  buildAgentMainSessionKey,
   parseAgentIdFromSessionKey,
 } from "@/lib/gateway/GatewayClient";
 import {
@@ -293,7 +292,9 @@ export class CustomRuntimeProvider implements RuntimeProvider {
     return this.client.onEvent(handler);
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   onRuntimeEvent(_handler: (event: RuntimeEvent) => void): () => void {
+    // No-op: custom runtime does not support runtime events
     return () => {};
   }
 
