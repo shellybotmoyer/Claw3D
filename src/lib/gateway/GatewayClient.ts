@@ -1081,6 +1081,7 @@ export const useGatewayConnection = (
         retryTimerRef.current = null;
       }
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connect, connectErrorCode, error, gatewayUrl, selectedAdapterType, status]);
 
   // Reset retry count after the connection has been stable for a minimum
