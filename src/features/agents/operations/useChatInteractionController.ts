@@ -314,7 +314,11 @@ export function useChatInteractionController(
       } catch (err) {
         const message = err instanceof Error ? err.message : "Failed to stop run.";
         params.setError(message);
-        console.error(message);
+        console.error("[useChatInteractionController] chat.abort failed", {
+          agentId,
+          sessionKey: stopIntent.sessionKey,
+          error: err instanceof Error ? err.message : String(err),
+        });
         params.dispatch({
           type: "appendOutput",
           agentId,
