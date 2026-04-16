@@ -120,7 +120,11 @@ export function useRuntimeSyncController(
       }
     } catch (error) {
       if (!isDisconnectLikeError(error)) {
-        console.error("Failed to load summary snapshot.", error);
+        console.error("[useRuntimeSyncController] Failed to load summary snapshot.", {
+          error: error instanceof Error ? error.message : String(error),
+          activeAgents: activeAgents.length,
+          requestedKeys: summaryIntent.keys,
+        });
       }
     }
   }, [client, dispatch, isDisconnectLikeError]);
