@@ -6,17 +6,20 @@ import type { StudioSettings } from "@/lib/studio/settings";
 
 describe("deriveHydrateAgentFleetResult", () => {
   it("derives_seeds_and_sync_sets_from_snapshots", () => {
-    const gatewayUrl = "ws://127.0.0.1:18789";
+    // Use the normalized gateway key so avatar lookups succeed.
+  // normalizeGatewayUrl("ws://127.0.0.1:18789") === "ws://localhost:18789"
+  const gatewayUrl = "ws://127.0.0.1:18789";
+  const gatewayKey = "ws://localhost:18789";
 
-    const settings: StudioSettings = {
-      version: 1,
-      gateway: null,
-      focused: {},
-      avatars: {
-        [gatewayUrl]: {
-          "agent-1": createDefaultAgentAvatarProfile("persisted-seed"),
-        },
+  const settings: StudioSettings = {
+    version: 1,
+    gateway: null,
+    focused: {},
+    avatars: {
+      [gatewayKey]: {
+        "agent-1": createDefaultAgentAvatarProfile("persisted-seed"),
       },
+    },
       deskAssignments: {},
       analytics: {},
       voiceReplies: {},
