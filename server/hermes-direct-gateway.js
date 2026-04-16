@@ -290,7 +290,7 @@ async function handleConnect(params) {
 }
 
 // 2. agents.list  -----------------------------------------------------------
-async function handleAgentsList(_params) {
+async function handleAgentsList() {
   const agents = [];
   for (const [, info] of agentRegistry.entries()) {
     agents.push({
@@ -444,7 +444,6 @@ async function handleSessionsPreview(params) {
       role: msg.role,
       text: (msg.content || "").slice(0, maxChars),
     }));
-    const lastMsg = messages[messages.length - 1];
     previews.push({
       key,
       status: "idle",
