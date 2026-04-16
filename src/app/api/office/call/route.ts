@@ -37,7 +37,8 @@ export async function POST(request: Request) {
       );
     }
 
-    // TODO: Create Claw3D voice and text skill.
+    // Claw3D voice/text is handled via the Hermes `claw3d-voice-text` skill.
+    // This route returns a mock scenario for the lobby UI to consume.
     const scenario = buildMockPhoneCallScenario({
       callee,
       message: message || null,
