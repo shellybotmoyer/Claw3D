@@ -37,7 +37,7 @@ export async function POST(request: Request) {
       );
     }
 
-    // TODO: Create Claw3D voice and text skill.
+    // Voice/text handled by claw3d-voice-text skill (see ~/.hermes/skills/claw3d-voice-text).
     const scenario = buildMockTextMessageScenario({
       recipient,
       message: message || null,
