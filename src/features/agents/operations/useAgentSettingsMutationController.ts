@@ -511,9 +511,12 @@ export function useAgentSettingsMutationController(params: UseAgentSettingsMutat
           onJobs: setSettingsCronJobs,
         });
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Failed to create automation.";
         if (!isGatewayDisconnectLikeError(err)) {
-          console.error(message);
+          console.error("[useAgentSettingsMutationController] createCronJob failed", {
+            agentId: decision.normalizedAgentId,
+            requestId: mutationContext.requestId,
+            error: err instanceof Error ? err.message : String(err),
+          });
         }
         throw err;
       }
@@ -555,7 +558,12 @@ export function useAgentSettingsMutationController(params: UseAgentSettingsMutat
       } catch (err) {
         const message = err instanceof Error ? err.message : "Failed to run schedule.";
         setSettingsCronError(message);
-        console.error(message);
+        console.error("[useAgentSettingsMutationController] runCronJob failed", {
+          agentId: resolvedAgentId,
+          jobId: resolvedJobId,
+          requestId: mutationContext.requestId,
+          error: err instanceof Error ? err.message : String(err),
+        });
       } finally {
         setCronRunBusyJobId((current) => (current === resolvedJobId ? null : current));
       }
@@ -593,7 +601,12 @@ export function useAgentSettingsMutationController(params: UseAgentSettingsMutat
       } catch (err) {
         const message = err instanceof Error ? err.message : "Failed to delete schedule.";
         setSettingsCronError(message);
-        console.error(message);
+        console.error("[useAgentSettingsMutationController] deleteCronJob failed", {
+          agentId: resolvedAgentId,
+          jobId: resolvedJobId,
+          requestId: mutationContext.requestId,
+          error: err instanceof Error ? err.message : String(err),
+        });
       } finally {
         setCronDeleteBusyJobId((current) => (current === resolvedJobId ? null : current));
       }
@@ -738,7 +751,11 @@ export function useAgentSettingsMutationController(params: UseAgentSettingsMutat
         const message = err instanceof Error ? err.message : "Failed to update skills.";
         setSettingsSkillsError(message);
         if (!isGatewayDisconnectLikeError(err)) {
-          console.error(message);
+          console.error("[useAgentSettingsMutationController] runSkillsMutation failed", {
+            agentId: decision.normalizedAgentId,
+            requestId: mutationContext.requestId,
+            error: err instanceof Error ? err.message : String(err),
+          });
         }
       } finally {
         setSettingsSkillsBusy(false);
@@ -896,7 +913,12 @@ export function useAgentSettingsMutationController(params: UseAgentSettingsMutat
           message,
         });
         if (!isGatewayDisconnectLikeError(err)) {
-          console.error(message);
+          console.error("[useAgentSettingsMutationController] runSkillSetupMutation failed", {
+            agentId: input.agentId,
+            skillKey: normalizedSkillKey,
+            requestId: mutationContext.requestId,
+            error: err instanceof Error ? err.message : String(err),
+          });
         }
       } finally {
         setSettingsSkillsBusyKey((current) => (current === normalizedSkillKey ? null : current));
