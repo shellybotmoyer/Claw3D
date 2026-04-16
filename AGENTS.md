@@ -25,7 +25,7 @@ Claw3D is a Next.js 16 frontend (TypeScript, React 19, Three.js, Phaser) for Ope
 ### Lint, typecheck, and tests
 
 - `npm run lint` — ESLint. The codebase has pre-existing warnings; no errors.
-- `npm run typecheck` — `tsc --noEmit`. Pre-existing type errors exist in some test files (`agentChatPanel-*.test.ts`) due to a stale `onOpenSettings` prop.
+- `npm run typecheck` — `tsc --noEmit`. Clean as of 2026-04-16.
 - `npm run test -- --run` — Vitest unit tests (use `--run` for single-run mode). A few pre-existing failures exist.
 - `npm run e2e` — Playwright E2E tests; requires `npx playwright install` first.
 - `npm run smoke:dev-server` — starts the dev server on a random port and verifies HTTP response.
