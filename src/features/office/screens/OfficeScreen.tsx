@@ -1053,11 +1053,12 @@ export function OfficeScreen({
     );
   }, [state.agents]);
   useEffect(() => {
+    const pendingTimeouts = pendingJukeboxCommandTimeoutsRef.current;
     return () => {
-      for (const pendingEntry of pendingJukeboxCommandTimeoutsRef.current.values()) {
+      for (const pendingEntry of pendingTimeouts.values()) {
         window.clearTimeout(pendingEntry.timeoutId);
       }
-      pendingJukeboxCommandTimeoutsRef.current.clear();
+      pendingTimeouts.clear();
     };
   }, []);
   const {
