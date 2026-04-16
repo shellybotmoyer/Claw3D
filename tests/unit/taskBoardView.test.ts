@@ -84,8 +84,12 @@ describe("TaskBoardView", () => {
     const onUpdateCard = vi.fn();
     const onDeleteCard = vi.fn();
     const onRefreshCronJobs = vi.fn();
-    const selectedCard = createCard();
 
+    // Render with the card pre-selected so the detail panel is visible.
+    // onSelectCard is a mock — it does not update React state — so we must
+    // pass the card as selectedCard so the panel renders for subsequent
+    // fireEvent calls on form fields.
+    const selectedCard = createCard();
     render(
       createElement(TaskBoardView, {
         title: "Kanban",
@@ -112,8 +116,11 @@ describe("TaskBoardView", () => {
       })
     );
 
+    // onCreateCard: header "New Task" button
     fireEvent.click(screen.getAllByRole("button", { name: /new task/i })[0]!);
+    // onRefreshCronJobs: header "Refresh" button
     fireEvent.click(screen.getByRole("button", { name: /refresh/i }));
+    // onSelectCard: clicking the already-selected card toggles it closed (calls null)
     fireEvent.click(screen.getAllByRole("button", { name: /new task/i })[1]!);
     fireEvent.change(screen.getByLabelText("Title"), {
       target: { value: "Create marketing website" },
@@ -128,7 +135,7 @@ describe("TaskBoardView", () => {
 
     expect(onCreateCard).toHaveBeenCalledTimes(1);
     expect(onRefreshCronJobs).toHaveBeenCalledTimes(1);
-    expect(onSelectCard).toHaveBeenCalledWith("task-1");
+    expect(onSelectCard).toHaveBeenCalledWith(null); // clicking already-selected card toggles it closed
     expect(onUpdateCard).toHaveBeenCalledWith("task-1", { title: "Create marketing website" });
     expect(onMoveCard).toHaveBeenCalledWith("task-1", "in_progress");
     expect(onUpdateCard).toHaveBeenCalledWith("task-1", { assignedAgentId: "agent-1" });
