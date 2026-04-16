@@ -1502,7 +1502,7 @@ export function OfficeScreen({
     loadAgentsInFlightRef.current = task;
     return task;
   }, [
-    client,
+    provider,
     debugEnabled,
     dispatch,
     gatewayUrl,
@@ -1831,6 +1831,7 @@ export function OfficeScreen({
       clearDeletedAgentUiState,
       client,
       dispatch,
+      focusLocalAgent,
       handleAvatarProfileSave,
       loadAgents,
       persistCompanyBuilderSnapshot,
@@ -1943,7 +1944,6 @@ export function OfficeScreen({
       client,
       createAgentBlock,
       createAgentBusy,
-      dispatch,
       enqueueConfigMutation,
       focusLocalAgent,
       hasDeleteMutationBlock,
@@ -4123,6 +4123,7 @@ export function OfficeScreen({
       pending.delete(agentId);
     }
   }, [
+    dispatch,
     jukeboxToken,
     skillTriggers.movementTargetByAgentId,
     soundclawReady,

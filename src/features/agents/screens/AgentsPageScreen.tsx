@@ -540,7 +540,6 @@ const AgentsPageScreen = () => {
       setAgentsLoadedOnce(true);
     }
   }, [
-    client,
     provider,
     dispatch,
     hydrateAgents,
