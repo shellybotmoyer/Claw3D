@@ -32,6 +32,7 @@ export type AgentSettingsMutationContext = {
   cronCreateBusy: boolean;
   cronRunBusyJobId: string | null;
   cronDeleteBusyJobId: string | null;
+  requestId?: string | null;
 };
 
 export type AgentSettingsMutationDenyReason =
