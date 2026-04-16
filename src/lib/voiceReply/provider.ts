@@ -29,7 +29,7 @@ const normalizeVoiceId = (value: string | null | undefined): string => {
 const synthesizeWithElevenLabs = async (
   request: VoiceReplySynthesisRequest
 ): Promise<Response> => {
-  // TODO: Create Claw3D voice and text skill.
+  // Voice reply skill (claw3d-voice-text) is managed at the Hermes level.
   const apiKey = process.env.ELEVENLABS_API_KEY?.trim();
   if (!apiKey) {
     throw new Error("Missing ELEVENLABS_API_KEY.");
