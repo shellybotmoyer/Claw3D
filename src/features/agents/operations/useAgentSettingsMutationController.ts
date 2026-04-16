@@ -173,7 +173,11 @@ export function useAgentSettingsMutationController(params: UseAgentSettingsMutat
         setSettingsSkillsReport(null);
         setSettingsSkillsError(message);
         if (!isGatewayDisconnectLikeError(err)) {
-          console.error(message);
+          console.error("[useAgentSettingsMutationController] loadSkills failed", {
+            agentId: resolvedAgentId,
+            requestId,
+            error: err instanceof Error ? err.message : String(err),
+          });
         }
       } finally {
         if (requestId === skillsLoadRequestIdRef.current) {
@@ -243,7 +247,10 @@ export function useAgentSettingsMutationController(params: UseAgentSettingsMutat
         setSettingsCronJobs([]);
         setSettingsCronError(message);
         if (!isGatewayDisconnectLikeError(err)) {
-          console.error(message);
+          console.error("[useAgentSettingsMutationController] loadCronJobs failed", {
+            agentId: resolvedAgentId,
+            error: err instanceof Error ? err.message : String(err),
+          });
         }
       } finally {
         setSettingsCronLoading(false);
