@@ -10,6 +10,7 @@ const eslintConfig = defineConfig([
     files: ["server/**/*.js", "scripts/**/*.js"],
     rules: {
       "@typescript-eslint/no-require-imports": "off",
+      "@typescript-eslint/no-unused-vars": ["error", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }],
     },
   },
   // Override default ignores of eslint-config-next.

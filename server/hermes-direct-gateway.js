@@ -464,7 +464,7 @@ async function handleSessionsReset(params) {
 }
 
 // 12. sessions.usage  -------------------------------------------------------
-async function handleSessionsUsage(params) {
+async function handleSessionsUsage(_params) {
   // Stub – Hermes doesn't track per-session usage
   return { sessions: [] };
 }
@@ -476,7 +476,6 @@ async function handleChatSend(params) {
     message,
     content,
     agentId: requestedAgentId,
-    deliver = true,
     idempotencyKey,
   } = params || {};
 
@@ -652,14 +651,14 @@ async function handleStatus(_params) {
 }
 
 // 20. wake  -----------------------------------------------------------------
-async function handleWake(params) {
+async function handleWake(_params) {
   // Trigger a heartbeat / no-op for Hermes
   return { ok: true };
 }
 
 // 21. agent.wait  -----------------------------------------------------------
-async function handleAgentWait(params) {
-  const { runId, timeoutMs = 30000 } = params || {};
+async function handleAgentWait(_params) {
+  const { runId } = _params || {};
   // The agent run completes synchronously in our chat.send, so just return immediately
   return { ok: true, runId, status: "completed" };
 }
