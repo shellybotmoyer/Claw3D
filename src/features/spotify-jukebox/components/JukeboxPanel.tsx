@@ -59,8 +59,7 @@ export function JukeboxPanel({ onClose }: JukeboxPanelProps) {
 
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [init]);
 
   return (
     <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/70 p-6 backdrop-blur-sm">
@@ -275,8 +274,7 @@ function PlayerView() {
     refreshPlayer();
     const id = window.setInterval(() => { void refreshPlayer(); }, 5000);
     return () => window.clearInterval(id);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [refreshPlayer]);
 
   const handleSearchChange = (value: string) => {
     setSearchQuery(value);
