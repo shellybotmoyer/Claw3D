@@ -14,9 +14,7 @@ async function main() {
 
   // Convert to Euler so we can damp x and y.
   const e = new THREE.Euler().setFromQuaternion(q, "XYZ");
-
-  console.log("Target Euler:");
-  console.log("x:", e.x, "y:", e.y, "z:", e.z);
+  void e;
 }
 
 void main();
