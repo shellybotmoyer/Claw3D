@@ -16,6 +16,15 @@ export const metadata: Metadata = {
     title: "Claw3D",
     description: "Focused operator studio for the OpenClaw gateway.",
   },
+  icons: {
+    icon: "/favicon.ico",
+  },
+};
+
+export const viewport = {
+  width: "device-width",
+  initialScale: 1,
+  themeColor: "#0f172a",
 };
 
 const display = Bebas_Neue({
