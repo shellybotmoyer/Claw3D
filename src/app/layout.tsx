@@ -16,9 +16,12 @@ export const metadata: Metadata = {
     title: "Claw3D",
     description: "Focused operator studio for the OpenClaw gateway.",
   },
-  icons: {
-    icon: "/favicon.ico",
-  },
+  icons: [
+    { rel: "icon", url: "/favicon.ico", type: "image/x-icon" },
+    { rel: "icon", url: "/favicon-16.png", sizes: "16x16", type: "image/png" },
+    { rel: "icon", url: "/favicon-32.png", sizes: "32x32", type: "image/png" },
+    { rel: "apple-touch-icon", url: "/apple-touch-icon.png", sizes: "180x180" },
+  ],
   manifest: "/manifest.json",
 };
 
