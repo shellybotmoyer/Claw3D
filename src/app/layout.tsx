@@ -5,6 +5,17 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "Claw3D",
   description: "Focused operator studio for the OpenClaw gateway.",
+  openGraph: {
+    title: "Claw3D",
+    description: "Focused operator studio for the OpenClaw gateway.",
+    type: "website",
+    siteName: "Claw3D",
+  },
+  twitter: {
+    card: "summary",
+    title: "Claw3D",
+    description: "Focused operator studio for the OpenClaw gateway.",
+  },
 };
 
 const display = Bebas_Neue({
