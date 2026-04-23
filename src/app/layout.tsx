@@ -10,9 +10,17 @@ export const metadata: Metadata = {
     description: "Focused operator studio for the OpenClaw gateway.",
     type: "website",
     siteName: "Claw3D",
+    images: [
+      {
+        url: "/og-image.svg",
+        width: 1200,
+        height: 630,
+        alt: "Claw3D - Focused Operator Studio for OpenClaw",
+      },
+    ],
   },
   twitter: {
-    card: "summary",
+    card: "summary_large_image",
     title: "Claw3D",
     description: "Focused operator studio for the OpenClaw gateway.",
   },
